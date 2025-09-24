@@ -1,13 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import type { Itinerary } from '../types';
 
-const API_KEY = process.env.API_KEY;
+let ai: GoogleGenAI | null = null;
 
-if (!API_KEY) {
-  console.error("API_KEY environment variable not set. Please ensure it is configured.");
-}
-
-const ai = new GoogleGenAI({ apiKey: API_KEY! });
+// Lazily initialize and return the GoogleGenAI client to prevent app crash on load
+const getAiClient = (): GoogleGenAI => {
+    if (!ai) {
+        const API_KEY = process.env.API_KEY;
+        if (!API_KEY) {
+            throw new Error("API key is not configured. Please ensure it is set up correctly.");
+        }
+        ai = new GoogleGenAI({ apiKey: API_KEY });
+    }
+    return ai;
+};
 
 const itinerarySchema = {
   type: Type.OBJECT,
@@ -59,7 +65,8 @@ export const generateItinerary = async (destination: string, duration: number, i
   `;
 
   try {
-    const response = await ai.models.generateContent({
+    const aiClient = getAiClient();
+    const response = await aiClient.models.generateContent({
       model: "gemini-2.5-flash",
       contents: prompt,
       config: {
@@ -81,6 +88,10 @@ export const generateItinerary = async (destination: string, duration: number, i
     
   } catch (error) {
     console.error("Error generating itinerary from Gemini API:", error);
-    return null;
+    // Re-throw the error to be caught by the UI component's error handler
+    if (error instanceof Error) {
+        throw error;
+    }
+    throw new Error("An unknown error occurred while contacting the Gemini API.");
   }
 };

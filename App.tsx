@@ -36,7 +36,11 @@ function App() {
       }
     } catch (err) {
       console.error(err);
-      setError("An unexpected error occurred. Please check the console and try again later.");
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError("An unexpected error occurred. Please check the console and try again later.");
+      }
     } finally {
       setIsLoading(false);
     }
