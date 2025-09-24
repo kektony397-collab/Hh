@@ -1,77 +1,66 @@
-import React from 'react';
+import React, { memo } from 'react';
+import { useBikeStateStore, useSettingsStore } from '../services/geminiService';
+import Speedometer from './ItineraryDisplay'; // Remapped
+import FuelGauge from './CategoryBadge';    // Remapped
+import Odometer from './LoadingSpinner';     // Remapped
 
-interface PlannerFormProps {
-    destination: string;
-    setDestination: (value: string) => void;
-    duration: string;
-    setDuration: (value: string) => void;
-    interests: string;
-    setInterests: (value: string) => void;
-    onSubmit: (e: React.FormEvent<HTMLFormElement>) => void;
-    isLoading: boolean;
-}
+// Range Indicator Component (inlined due to file constraints)
+const RangeIndicator: React.FC<{ range: number }> = memo(({ range }) => (
+    <div className="bg-black/30 rounded-xl p-6 border border-[var(--cyber-gray)]/50 text-center">
+        <h2 className="text-xl font-orbitron text-[var(--cyber-blue)]/80 mb-2">EST. RANGE</h2>
+        <p className="text-5xl font-orbitron text-white">
+            {range < 0 ? 0 : Math.round(range)}
+            <span className="text-2xl text-slate-400 ml-2">km</span>
+        </p>
+    </div>
+));
+RangeIndicator.displayName = 'RangeIndicator';
 
-export const PlannerForm: React.FC<PlannerFormProps> = ({
-    destination,
-    setDestination,
-    duration,
-    setDuration,
-    interests,
-    setInterests,
-    onSubmit,
-    isLoading
-}) => {
+const DashboardPage: React.FC<{gpsError: string | null}> = memo(({ gpsError }) => {
+    const { currentSpeedKph, currentFuelL, tripKm, totalOdometerKm, isGpsAvailable } = useBikeStateStore();
+    const { tankCapacityL, reserveLiters, fuelEconomyKmPerL, _hasHydrated } = useSettingsStore();
+    
+    // Wait until settings are hydrated from DB to prevent flicker
+    if (!_hasHydrated) {
+        return <div className="text-center p-10">Initializing Dashboard...</div>;
+    }
+
+    const range = currentFuelL * fuelEconomyKmPerL;
+
     return (
-        <form onSubmit={onSubmit} className="p-6 bg-slate-800/50 border border-slate-700 rounded-lg shadow-lg space-y-4 backdrop-blur-sm">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                    <label htmlFor="destination" className="block text-sm font-medium text-slate-300">Destination</label>
-                    <input
-                        type="text"
-                        id="destination"
-                        value={destination}
-                        onChange={(e) => setDestination(e.target.value)}
-                        placeholder="e.g., Tokyo, Japan"
-                        className="mt-1 block w-full bg-slate-800/50 border-slate-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        required
-                    />
+        <div className="space-y-8">
+            <div className="text-center h-6">
+                {gpsError && (
+                    <p className="text-[var(--cyber-pink)]">GPS Error: {gpsError}</p>
+                )}
+                {!isGpsAvailable && !gpsError && (
+                    <p className="text-yellow-400 font-bold animate-pulse">
+                        ● WAITING FOR GPS SIGNAL...
+                    </p>
+                )}
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="space-y-6">
+                    <Speedometer speed={currentSpeedKph} />
+                    <div className="grid grid-cols-2 gap-4">
+                        <Odometer value={tripKm} label="Trip Distance" />
+                        <Odometer value={totalOdometerKm} label="Total Odometer" />
+                    </div>
                 </div>
-                 <div>
-                    <label htmlFor="duration" className="block text-sm font-medium text-slate-300">Trip Duration (days)</label>
-                    <input
-                        type="number"
-                        id="duration"
-                        value={duration}
-                        onChange={(e) => setDuration(e.target.value)}
-                        placeholder="e.g., 7"
-                        min="1"
-                        max="14"
-                        className="mt-1 block w-full bg-slate-800/50 border-slate-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                        required
+
+                <div className="space-y-6">
+                    <FuelGauge
+                        currentFuel={currentFuelL}
+                        tankCapacity={tankCapacityL}
+                        reserveLevel={reserveLiters}
                     />
+                    <RangeIndicator range={range} />
                 </div>
             </div>
-            <div>
-                <label htmlFor="interests" className="block text-sm font-medium text-slate-300">Interests & Preferences</label>
-                <textarea
-                    id="interests"
-                    value={interests}
-                    onChange={(e) => setInterests(e.target.value)}
-                    placeholder="e.g., interested in history, anime, sushi, and nightlife"
-                    rows={3}
-                    className="mt-1 block w-full bg-slate-800/50 border-slate-600 rounded-md shadow-sm py-2 px-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                    required
-                />
-            </div>
-            <div className="flex justify-end pt-2">
-                <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="inline-flex items-center justify-center px-6 py-2.5 border border-transparent text-base font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 focus:ring-offset-slate-900 disabled:bg-slate-500 disabled:cursor-not-allowed transition-colors"
-                >
-                    {isLoading ? 'Generating...' : 'Create Itinerary'}
-                </button>
-            </div>
-        </form>
+        </div>
     );
-};
+});
+
+DashboardPage.displayName = 'DashboardPage';
+export default DashboardPage;

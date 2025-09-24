@@ -1,97 +1,95 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import type { Itinerary } from '../types';
+// Fix: Use named import for Dexie to align with modern Dexie v4+ API and correct type inference.
+import { Dexie } from 'dexie';
+import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import type { DBTables, BikeState, SettingsState } from '../types';
 
-let ai: GoogleGenAI | null = null;
+// 1. DEXIE DATABASE SETUP
+class BikeDashboardDB extends Dexie {
+  settings!: DBTables['settings'];
+  refuelRecords!: DBTables['refuelRecords'];
+  tripLogs!: DBTables['tripLogs'];
 
-// Lazily initialize and return the GoogleGenAI client to prevent app crash on load
-const getAiClient = (): GoogleGenAI => {
-    if (!ai) {
-        const API_KEY = process.env.API_KEY;
-        if (!API_KEY) {
-            throw new Error("API key is not configured. Please ensure it is set up correctly.");
-        }
-        ai = new GoogleGenAI({ apiKey: API_KEY });
-    }
-    return ai;
-};
-
-const itinerarySchema = {
-  type: Type.OBJECT,
-  properties: {
-    destination: { type: Type.STRING, description: "The destination city and country." },
-    duration: { type: Type.INTEGER, description: "The total number of days for the trip." },
-    itinerary: {
-      type: Type.ARRAY,
-      description: "A list of daily plans.",
-      items: {
-        type: Type.OBJECT,
-        properties: {
-          day: { type: Type.INTEGER, description: "The day number, starting from 1." },
-          theme: { type: Type.STRING, description: "A creative theme for the day's activities, e.g., 'Historical Exploration' or 'Culinary Adventure'." },
-          items: {
-            type: Type.ARRAY,
-            description: "A list of activities for the day.",
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                time: { type: Type.STRING, description: "Suggested time for the activity, e.g., '9:00 AM'." },
-                activity: { type: Type.STRING, description: "A short, catchy name for the activity." },
-                description: { type: Type.STRING, description: "A detailed description of the activity (2-3 sentences)." },
-                category: { 
-                  type: Type.STRING,
-                  description: "The category of the activity.",
-                  enum: ['Food', 'Activity', 'Sightseeing', 'Travel']
-                },
-              },
-              required: ['time', 'activity', 'description', 'category'],
-            },
-          },
-        },
-        required: ['day', 'theme', 'items'],
-      },
-    },
-  },
-  required: ['destination', 'duration', 'itinerary'],
-};
-
-export const generateItinerary = async (destination: string, duration: number, interests: string): Promise<Itinerary | null> => {
-  const prompt = `
-    Create a detailed travel itinerary for a trip to ${destination} for ${duration} days.
-    The traveler's interests include: ${interests}.
-    
-    For each day, provide a creative theme and a schedule of activities from morning to evening. 
-    Each activity must have a suggested time, a short name, a detailed description, and a category ('Food', 'Activity', 'Sightseeing', 'Travel').
-    Ensure the plan is logical, well-paced, and reflects the specified interests.
-  `;
-
-  try {
-    const aiClient = getAiClient();
-    const response = await aiClient.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: itinerarySchema,
-        temperature: 0.7,
-      },
+  constructor() {
+    super('BikeDashboardDB');
+    this.version(1).stores({
+      settings: '++id, &key',
+      refuelRecords: '++id, timestamp, needsSync',
+      tripLogs: '++id, startTimestamp, needsSync'
     });
-
-    const jsonText = response.text.trim();
-    try {
-        const parsedJson = JSON.parse(jsonText);
-        return parsedJson as Itinerary;
-    } catch (e) {
-        console.error("Failed to parse Gemini's JSON response:", e);
-        console.error("Raw response text:", jsonText);
-        return null;
-    }
-    
-  } catch (error) {
-    console.error("Error generating itinerary from Gemini API:", error);
-    // Re-throw the error to be caught by the UI component's error handler
-    if (error instanceof Error) {
-        throw error;
-    }
-    throw new Error("An unknown error occurred while contacting the Gemini API.");
   }
+}
+
+export const db = new BikeDashboardDB();
+
+
+// 2. ZUSTAND STATE MANAGEMENT
+
+// == Bike State Slice (Real-time, not persisted) ==
+export const useBikeStateStore = create<BikeState>((set) => ({
+  currentFuelL: 15,
+  tripKm: 0,
+  totalOdometerKm: 1250,
+  currentSpeedKph: 0,
+  isGpsAvailable: true,
+  lastPosition: null,
+
+  updateFromGps: ({ speedKph, distanceDeltaKm, isGpsAvailable, newPosition }) => {
+    set((state) => ({
+        currentSpeedKph: speedKph,
+        tripKm: state.tripKm + distanceDeltaKm,
+        totalOdometerKm: state.totalOdometerKm + distanceDeltaKm,
+        isGpsAvailable,
+        lastPosition: newPosition,
+    }));
+  },
+
+  consumeFuel: (liters) => {
+    set((state) => ({
+        currentFuelL: Math.max(0, state.currentFuelL - liters)
+    }));
+  },
+
+  setGpsStatus: (available) => set({ isGpsAvailable: available }),
+  resetTrip: () => set({ tripKm: 0 }),
+}));
+
+
+// == Settings Slice (Persisted to IndexedDB) ==
+const dexieStorage = {
+    getItem: async (name: string): Promise<string | null> => {
+        const setting = await db.settings.get({ key: name });
+        return setting ? (setting.value as string) : null;
+    },
+    setItem: async (name: string, value: string): Promise<void> => {
+        await db.settings.put({ key: name, value: value });
+    },
+    removeItem: async (name: string): Promise<void> => {
+        await db.settings.where('key').equals(name).delete();
+    },
 };
+
+export const useSettingsStore = create<SettingsState>()(
+  persist(
+    (set) => ({
+      // Default settings
+      bikeModel: 'Urban Commuter 5000',
+      tankCapacityL: 15,
+      fuelEconomyKmPerL: 25,
+      reserveLiters: 2,
+      theme: 'dark',
+      _hasHydrated: false,
+      setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
+
+      // Actions
+      setFuelEconomy: (economy) => set({ fuelEconomyKmPerL: economy }),
+    }),
+    {
+      name: 'bike-settings-storage',
+      storage: createJSONStorage(() => dexieStorage),
+      onRehydrateStorage: () => (state) => {
+        if (state) state.setHasHydrated(true);
+      },
+    }
+  )
+);

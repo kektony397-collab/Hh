@@ -1,95 +1,172 @@
-import React, { useState } from 'react';
-import type { Itinerary } from './types';
-import { generateItinerary } from './services/geminiService';
-import { PlannerForm } from './components/PlannerForm';
-import { ItineraryDisplay } from './components/ItineraryDisplay';
-import LoadingSpinner from './components/LoadingSpinner';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { KalmanFilter } from 'kalman-filter';
 
-function App() {
-  const [destination, setDestination] = useState('');
-  const [duration, setDuration] = useState('');
-  const [interests, setInterests] = useState('');
+import { useBikeStateStore, useSettingsStore } from './services/geminiService';
+import DashboardPage from './components/PlannerForm'; // Remapped to DashboardPage
 
-  const [itinerary, setItinerary] = useState<Itinerary | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+// --- GLOBAL HOOKS (defined here due to file constraints) ---
 
-  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setIsLoading(true);
-    setError(null);
-    setItinerary(null);
+// Haversine formula for distance calculation
+const calculateDistanceKm = (
+  lat1: number, lon1: number,
+  lat2: number, lon2: number
+): number => {
+  const R = 6371; // Earth's radius in km
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon/2) * Math.sin(dLon/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+};
 
-    const durationNum = parseInt(duration, 10);
-    if (isNaN(durationNum) || durationNum <= 0) {
-        setError("Please enter a valid number of days.");
-        setIsLoading(false);
-        return;
-    }
+// useGeolocation Hook
+const useGeolocation = () => {
+    const { updateFromGps, setGpsStatus, lastPosition } = useBikeStateStore();
+    const [error, setError] = useState<string | null>(null);
 
-    try {
-      const result = await generateItinerary(destination, durationNum, interests);
-      if (result) {
-        setItinerary(result);
-      } else {
-        setError("Sorry, we couldn't create an itinerary. The AI might be busy. Please try again.");
-      }
-    } catch (err) {
-      console.error(err);
-      if (err instanceof Error) {
+    const kalmanFilter = useMemo(() => new KalmanFilter({ R: 0.01, Q: 3 }), []);
+
+    const onSuccess = useCallback((pos: GeolocationPosition) => {
+        setError(null);
+
+        const smoothed = kalmanFilter.filter([pos.coords.latitude, pos.coords.longitude]);
+        const newPosition = { lat: smoothed[0], lng: smoothed[1], timestamp: pos.timestamp };
+
+        let distanceDeltaKm = 0;
+        if (lastPosition && lastPosition.lat && lastPosition.lng) {
+            distanceDeltaKm = calculateDistanceKm(
+                lastPosition.lat, lastPosition.lng,
+                newPosition.lat, newPosition.lng
+            );
+        }
+        
+        const speedKph = pos.coords.speed ? pos.coords.speed * 3.6 : 0; // m/s to km/h
+
+        updateFromGps({ speedKph, distanceDeltaKm, isGpsAvailable: true, newPosition });
+
+    }, [updateFromGps, lastPosition, kalmanFilter]);
+
+    const onError = useCallback((err: GeolocationPositionError) => {
         setError(err.message);
-      } else {
-        setError("An unexpected error occurred. Please check the console and try again later.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  };
+        setGpsStatus(false);
+    }, [setGpsStatus]);
+
+    useEffect(() => {
+        if (!navigator.geolocation) {
+            setError('Geolocation is not supported by this browser.');
+            setGpsStatus(false);
+            return;
+        }
+
+        const watchId = navigator.geolocation.watchPosition(onSuccess, onError, {
+            enableHighAccuracy: true,
+            timeout: 10000,
+            maximumAge: 0
+        });
+
+        return () => navigator.geolocation.clearWatch(watchId);
+    }, [onSuccess, onError, setGpsStatus]);
+
+    return { error };
+};
+
+// useFuelCalculator Hook
+const useFuelCalculator = () => {
+    const { totalOdometerKm } = useBikeStateStore.getState();
+    const consumeFuel = useBikeStateStore((state) => state.consumeFuel);
+    const { fuelEconomyKmPerL } = useSettingsStore.getState();
+    const [lastOdometer, setLastOdometer] = useState(totalOdometerKm);
+
+    useEffect(() => {
+        return useBikeStateStore.subscribe(
+            (state) => state.totalOdometerKm,
+            (currentOdometer) => {
+                const distanceTraveled = currentOdometer - lastOdometer;
+                if (distanceTraveled > 0) {
+                    const fuelConsumed = distanceTraveled / useSettingsStore.getState().fuelEconomyKmPerL;
+                    consumeFuel(fuelConsumed);
+                    setLastOdometer(currentOdometer);
+                }
+            }
+        );
+    }, [lastOdometer, consumeFuel]);
+};
+
+// useNetworkStatus Hook
+const useNetworkStatus = () => {
+    const [isOnline, setIsOnline] = useState(navigator.onLine);
+    useEffect(() => {
+        const handleOnline = () => setIsOnline(true);
+        const handleOffline = () => setIsOnline(false);
+        window.addEventListener('online', handleOnline);
+        window.addEventListener('offline', handleOffline);
+        return () => {
+            window.removeEventListener('online', handleOnline);
+            window.removeEventListener('offline', handleOffline);
+        };
+    }, []);
+    return isOnline;
+};
+
+
+// --- LAYOUT COMPONENTS (defined here due to file constraints) ---
+const Navigation: React.FC<{ activePage: string; setActivePage: (page: string) => void; }> = ({ activePage, setActivePage }) => {
+    const navItems = ['Dashboard', 'History', 'Settings'];
+    return (
+        <nav className="p-4 bg-black/20 backdrop-blur-sm border-b border-[var(--cyber-gray)] sticky top-0 z-10">
+            <div className="container mx-auto flex justify-center items-center gap-8">
+                {navItems.map(item => (
+                    <button
+                        key={item}
+                        onClick={() => setActivePage(item)}
+                        className={`font-orbitron text-lg transition-colors duration-300 ${activePage === item ? 'text-[var(--cyber-blue)]' : 'text-slate-400 hover:text-white'}`}
+                    >
+                        {item}
+                    </button>
+                ))}
+            </div>
+        </nav>
+    );
+};
+
+// --- PLACEHOLDER PAGES ---
+const PlaceholderPage: React.FC<{ title: string }> = ({ title }) => (
+    <div className="text-center p-10 border-2 border-dashed border-[var(--cyber-gray)] rounded-lg">
+        <h2 className="text-3xl font-orbitron">{title}</h2>
+        <p className="text-slate-400 mt-2">This feature is under construction.</p>
+    </div>
+);
+
+
+// --- MAIN APP COMPONENT ---
+function App() {
+  const [activePage, setActivePage] = useState('Dashboard');
+  const isOnline = useNetworkStatus();
   
-  const backgroundStyle = {
-    backgroundImage: `radial-gradient(circle at top left, rgba(14, 165, 233, 0.15), transparent 40%),
-                       radial-gradient(circle at bottom right, rgba(99, 102, 241, 0.15), transparent 40%)`,
-  };
+  // Initialize global hooks
+  const { error: gpsError } = useGeolocation();
+  useFuelCalculator();
+  
+  // Initialize settings hydration
+  useEffect(() => {
+    useSettingsStore.persist.rehydrate();
+  }, []);
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white selection:bg-blue-500/30" style={backgroundStyle}>
-      <main className="container mx-auto px-4 py-8 md:py-16">
-        <header className="text-center mb-12">
-            <h1 className="text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-sky-400 to-indigo-400 bg-clip-text text-transparent pb-2">
-                Gemini Itinerary Planner
-            </h1>
-            <p className="max-w-2xl mx-auto text-slate-400 mt-2">
-                Craft your perfect journey. Tell our AI your destination, duration, and interests, and get a personalized, day-by-day travel plan in seconds.
-            </p>
-        </header>
-
-        <div className="max-w-4xl mx-auto">
-          <PlannerForm
-            destination={destination}
-            setDestination={setDestination}
-            duration={duration}
-            setDuration={setDuration}
-            interests={interests}
-            setInterests={setInterests}
-            onSubmit={handleSubmit}
-            isLoading={isLoading}
-          />
-          
-          {error && (
-            <div className="mt-8 bg-red-500/10 border border-red-500/30 text-red-300 px-4 py-3 rounded-md text-center">
-              {error}
-            </div>
-          )}
-          
-          <div className="mt-10">
-            {isLoading && <LoadingSpinner />}
-            {itinerary && <ItineraryDisplay itinerary={itinerary} />}
-          </div>
-        </div>
-      </main>
-       <footer className="text-center py-6 text-sm text-slate-500">
-            <p>Powered by Google Gemini. UI crafted with passion.</p>
-        </footer>
+    <div className="min-h-screen bg-cyber-gradient text-white font-exo">
+        <Navigation activePage={activePage} setActivePage={setActivePage} />
+        <main className="container mx-auto px-4 py-8">
+            {!isOnline && (
+                <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3 mb-6 text-center text-amber-300">
+                    <span className="font-bold">●</span> You are currently offline.
+                </div>
+            )}
+            {activePage === 'Dashboard' && <DashboardPage gpsError={gpsError} />}
+            {activePage === 'History' && <PlaceholderPage title="Refuel History" />}
+            {activePage === 'Settings' && <PlaceholderPage title="Settings" />}
+        </main>
     </div>
   );
 }
